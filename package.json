@@ -1,0 +1,23 @@
+{
+  "name": "port-pilot",
+  "version": "1.0.0",
+  "description": "A fast CLI tool that detects running localhost ports and lets users manage them.",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "bin": {
+    "port-pilot": "./bin/port-pilot.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node bin/port-pilot.js"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "cli-table3": "^0.6.5",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
