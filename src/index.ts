@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { listCommand } from './commands/list';
 import { killCommand } from './commands/kill';
+import { tuiCommand } from './commands/tui';
 import chalk from 'chalk';
 
 const program = new Command();
@@ -13,11 +14,12 @@ program
 // Register commands
 listCommand(program);
 killCommand(program);
+tuiCommand(program);
 
 // Parse the arguments
 program.parse(process.argv);
 
-// Output help by default if no command is passed
+// Launch TUI by default if no command is passed
 if (!process.argv.slice(2).length) {
-  program.outputHelp();
+  program.parseAsync(['node', 'port-pilot', 'ui']);
 }

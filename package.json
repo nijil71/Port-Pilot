@@ -12,6 +12,8 @@
     "start": "node bin/port-pilot.js"
   },
   "dependencies": {
+    "@types/blessed": "^0.1.27",
+    "blessed": "^0.1.81",
     "chalk": "^4.1.2",
     "cli-table3": "^0.6.5",
     "commander": "^13.1.0"
