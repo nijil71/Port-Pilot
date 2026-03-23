@@ -7,6 +7,7 @@ export interface ProcessInfo {
   port: number;
   pid: number;
   process: string;
+  project?: string;
   memory?: number;
 }
 
@@ -98,6 +99,7 @@ async function getWindowsPorts(): Promise<ProcessInfo[]> {
       unique.set(p.port, p);
     }
     
+    await enrichWithCommandLines(Array.from(unique.values()));
     return Array.from(unique.values()).sort((a, b) => a.port - b.port);
     
   } catch (error) {
@@ -141,6 +143,7 @@ async function getUnixPorts(): Promise<ProcessInfo[]> {
       }
     }
     await enrichWithUnixMemory(processes);
+    await enrichWithCommandLines(processes);
     return processes.sort((a, b) => a.port - b.port);
   } catch (error) {
     // If lsof fails (e.g., not installed on Linux)
@@ -188,6 +191,7 @@ async function getLinuxSSPorts(): Promise<ProcessInfo[]> {
       }
     }
     await enrichWithUnixMemory(processes);
+    await enrichWithCommandLines(processes);
     return processes.sort((a, b) => a.port - b.port);
   } catch (error) {
     return [];
@@ -218,5 +222,74 @@ async function enrichWithUnixMemory(processes: ProcessInfo[]) {
   } catch (err) {
     // Ignore if ps fails
   }
+}
+
+async function enrichWithCommandLines(processes: ProcessInfo[]) {
+  if (processes.length === 0) return;
+  const pids = processes.map(p => p.pid);
+  
+  let map = new Map<number, string>();
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execAsync(`wmic process get ProcessId,CommandLine /format:list`, { maxBuffer: 10 * 1024 * 1024 });
+      const lines = stdout.split(/\r?\n/);
+      let currentCmd = '';
+      for (const line of lines) {
+        if (line.startsWith('CommandLine=')) {
+          currentCmd = line.substring('CommandLine='.length).trim();
+        } else if (line.startsWith('ProcessId=')) {
+          const pid = parseInt(line.substring('ProcessId='.length), 10);
+          if (!isNaN(pid) && currentCmd) {
+            map.set(pid, currentCmd);
+          }
+          currentCmd = '';
+        }
+      }
+    } catch {}
+  } else {
+    try {
+      const { stdout } = await execAsync('ps -o pid= -o command= -p ' + pids.join(','));
+      const lines = stdout.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const spaceIdx = trimmed.indexOf(' ');
+        if (spaceIdx > 0) {
+          const pid = parseInt(trimmed.substring(0, spaceIdx), 10);
+          const cmdLine = trimmed.substring(spaceIdx + 1).trim();
+          if (!isNaN(pid)) {
+            map.set(pid, cmdLine);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  for (const p of processes) {
+    const cmdLine = map.get(p.pid);
+    p.project = extractProjectName(cmdLine || '', p.process);
+  }
+}
+
+function extractProjectName(cmdLine: string, fallbackName: string): string {
+  if (!cmdLine) return fallbackName;
+  
+  const pathRegex = /(?:[a-zA-Z]:[\\/]|[/])[^\s"']+/g;
+  const matches = cmdLine.match(pathRegex) || [];
+  
+  const ignoreDirs = new Set(['node_modules', 'bin', 'src', 'dist', 'build', 'public', 'system32', 'program files', 'nodejs', 'usr', 'opt', 'var', 'lib', 'windows']);
+  
+  for (let match of matches.reverse()) {
+    let p = match.replace(/\\/g, '/');
+    const segments = p.split('/').filter(Boolean);
+    
+    for (let i = segments.length - 2; i >= 0; i--) {
+      const dir = segments[i];
+      if (dir && !ignoreDirs.has(dir.toLowerCase()) && !dir.includes('.')) {
+        return dir;
+      }
+    }
+  }
+  return fallbackName;
 }
 

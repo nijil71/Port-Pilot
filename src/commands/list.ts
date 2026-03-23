@@ -30,7 +30,11 @@ export function listCommand(program: Command) {
           const isNode = p.process.toLowerCase().includes('node');
           const isHighMem = p.memory && p.memory >= 500;
 
-          let processName = isNode ? chalk.green.bold(p.process) : p.process;
+          let displayName = p.project && p.project !== p.process 
+            ? `${p.project} (${p.process})` 
+            : p.process;
+
+          let processName = isNode ? chalk.green.bold(displayName) : displayName;
           let memoryStr = p.memory !== undefined ? `${p.memory} MB` : 'Unknown';
           
           if (isHighMem) {
