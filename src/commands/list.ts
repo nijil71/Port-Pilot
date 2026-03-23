@@ -19,18 +19,34 @@ export function listCommand(program: Command) {
 
         const table = new Table({
           head: [
-            chalk.cyan('Port'),
-            chalk.cyan('Process Name'),
-            chalk.cyan('PID')
-          ],
-          colWidths: [10, 30, 15]
+            chalk.cyan.bold('Port'),
+            chalk.cyan.bold('Process'),
+            chalk.cyan.bold('PID'),
+            chalk.cyan.bold('Memory (MB)')
+          ]
         });
 
         for (const p of ports) {
+          const isNode = p.process.toLowerCase().includes('node');
+          const isHighMem = p.memory && p.memory >= 500;
+
+          let processName = isNode ? chalk.green.bold(p.process) : p.process;
+          let memoryStr = p.memory !== undefined ? `${p.memory} MB` : 'Unknown';
+          
+          if (isHighMem) {
+            memoryStr = chalk.red.bold(memoryStr);
+            processName = chalk.yellow.bold(processName);
+          } else if (p.memory !== undefined) {
+            memoryStr = chalk.gray(memoryStr);
+          } else {
+            memoryStr = chalk.dim(memoryStr);
+          }
+
           table.push([
-            chalk.green(p.port.toString()),
-            p.process,
-            p.pid.toString()
+            chalk.blueBright(p.port.toString()),
+            processName,
+            chalk.gray(p.pid.toString()),
+            memoryStr
           ]);
         }
 

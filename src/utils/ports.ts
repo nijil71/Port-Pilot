@@ -7,6 +7,7 @@ export interface ProcessInfo {
   port: number;
   pid: number;
   process: string;
+  memory?: number;
 }
 
 export async function killProcess(pid: number, force: boolean): Promise<void> {
@@ -61,27 +62,29 @@ async function getWindowsPorts(): Promise<ProcessInfo[]> {
       try {
         const { stdout: tasklistOut } = await execAsync('tasklist /FO CSV');
         const tasks = tasklistOut.split('\n');
-        const pidMap = new Map<number, string>();
+        const pidMap = new Map<number, { name: string; memory: number }>();
         
-        // Skip header
         for (let i = 1; i < tasks.length; i++) {
           const taskLine = tasks[i].trim();
           if (!taskLine) continue;
           
-          // "Image Name","PID",...
           const csvParts = taskLine.split('","').map(s => s.replace(/(^"|"$)/g, ''));
-          if (csvParts.length >= 2) {
+          if (csvParts.length >= 5) {
             const name = csvParts[0];
             const pid = parseInt(csvParts[1], 10);
+            const memK = parseInt(csvParts[4].replace(/[^\d]/g, ''), 10);
+            
             if (!isNaN(pid)) {
-              pidMap.set(pid, name);
+              pidMap.set(pid, { name, memory: isNaN(memK) ? 0 : Math.round(memK / 1024) });
             }
           }
         }
         
         for (const p of processes) {
           if (pidMap.has(p.pid)) {
-            p.process = pidMap.get(p.pid) ?? 'Unknown';
+            const info = pidMap.get(p.pid)!;
+            p.process = info.name;
+            p.memory = info.memory;
           }
         }
       } catch (err) {
@@ -137,6 +140,7 @@ async function getUnixPorts(): Promise<ProcessInfo[]> {
         }
       }
     }
+    await enrichWithUnixMemory(processes);
     return processes.sort((a, b) => a.port - b.port);
   } catch (error) {
     // If lsof fails (e.g., not installed on Linux)
@@ -183,8 +187,36 @@ async function getLinuxSSPorts(): Promise<ProcessInfo[]> {
         }
       }
     }
+    await enrichWithUnixMemory(processes);
     return processes.sort((a, b) => a.port - b.port);
   } catch (error) {
     return [];
   }
 }
+
+async function enrichWithUnixMemory(processes: ProcessInfo[]) {
+  if (processes.length === 0) return;
+  try {
+    const { stdout } = await execAsync('ps -e -o pid,rss');
+    const lines = stdout.split('\n');
+    const memMap = new Map<number, number>();
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 2) {
+        const pid = parseInt(parts[0], 10);
+        const rss = parseInt(parts[1], 10);
+        if (!isNaN(pid) && !isNaN(rss)) {
+          memMap.set(pid, Math.round(rss / 1024));
+        }
+      }
+    }
+    for (const p of processes) {
+      if (memMap.has(p.pid)) {
+        p.memory = memMap.get(p.pid);
+      }
+    }
+  } catch (err) {
+    // Ignore if ps fails
+  }
+}
+
