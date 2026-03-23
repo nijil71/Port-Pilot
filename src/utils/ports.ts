@@ -9,6 +9,7 @@ export interface ProcessInfo {
   process: string;
   project?: string;
   memory?: number;
+  cmdLine?: string;
 }
 
 export async function killProcess(pid: number, force: boolean): Promise<void> {
@@ -267,6 +268,7 @@ async function enrichWithCommandLines(processes: ProcessInfo[]) {
 
   for (const p of processes) {
     const cmdLine = map.get(p.pid);
+    p.cmdLine = cmdLine || '';
     p.project = extractProjectName(cmdLine || '', p.process);
   }
 }
