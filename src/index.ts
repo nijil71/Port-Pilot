@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { listCommand } from './commands/list';
 import { killCommand } from './commands/kill';
-import { tuiCommand } from './commands/tui';
+import { tuiCommand, launchTUI } from './commands/tui';
 import chalk from 'chalk';
 
 const program = new Command();
@@ -16,10 +16,9 @@ listCommand(program);
 killCommand(program);
 tuiCommand(program);
 
-// Parse the arguments
-program.parse(process.argv);
-
-// Launch TUI by default if no command is passed
+// Launch TUI by default if no command is passed, otherwise parse normally
 if (!process.argv.slice(2).length) {
-  program.parseAsync(['node', 'port-pilot', 'ui']);
+  launchTUI();
+} else {
+  program.parse(process.argv);
 }
