@@ -6,6 +6,15 @@
   "type": "commonjs",
   "license": "MIT",
   "keywords": ["port", "localhost", "process", "kill", "cli", "tui", "developer-tools", "network"],
+  "author": "Nijil <nmnijilkhan@gmail.com>",
+  "homepage": "https://github.com/nijil71/port-fix#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nijil71/port-fix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nijil71/port-fix/issues"
+  },
   "engines": {
     "node": ">=18"
   },
