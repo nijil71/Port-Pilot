@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { exec } from 'child_process';
 import blessed from 'blessed';
+import path from 'path';
 import { getRunningPorts, killProcess, isSystemProcess, redactCmdLine, ProcessInfo } from '../utils/ports';
 
 const AUTO_REFRESH_MS = 3000;
@@ -149,7 +150,7 @@ export async function launchTUI() {
 
   // ── Helpers ───────────────────────────────────────────
   function getDisplayName(p: ProcessInfo): string {
-    if (p.project && p.project !== p.process) return p.project;
+    if (p.project && p.project !== p.process) return path.basename(p.project);
     return p.process.replace(/\.exe$/i, '');
   }
 

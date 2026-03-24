@@ -22,16 +22,33 @@ export async function killProcess(pid: number, force: boolean): Promise<void> {
   }
 }
 
+const DEV_PROCESSES = new Set(['node', 'npm', 'yarn', 'python', 'python3', 'uvicorn', 'flask', 'java']);
+
 export async function getRunningPorts(): Promise<ProcessInfo[]> {
   const platform = process.platform;
+  let processes: ProcessInfo[] = [];
   
   if (platform === 'win32') {
-    return getWindowsPorts();
+    processes = await getWindowsPorts();
   } else if (platform === 'darwin' || platform === 'linux') {
-    return getUnixPorts();
+    processes = await getUnixPorts();
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
   }
+
+  return processes.filter(p => {
+    if (isSystemProcess(p)) return false;
+
+    const procName = p.process.toLowerCase();
+
+    if (DEV_PROCESSES.has(procName)) return true;
+
+    if (p.project && p.project !== p.process && p.project !== 'Unknown') return true;
+
+    if (p.port >= 3000 && p.port <= 9000) return true;
+
+    return false;
+  });
 }
 
 async function getWindowsPorts(): Promise<ProcessInfo[]> {

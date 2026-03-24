@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import Table from 'cli-table3';
 import chalk from 'chalk';
+import path from 'path';
 import { getRunningPorts } from '../utils/ports';
 
 export function listCommand(program: Command) {
@@ -37,8 +38,8 @@ export function listCommand(program: Command) {
           const isHighMem = p.memory && p.memory >= 500;
 
           let displayName = p.project && p.project !== p.process 
-            ? `${p.project} (${p.process})` 
-            : p.process;
+            ? `${path.basename(p.project)} (${p.process})` 
+            : p.process.replace(/\.exe$/i, '');
 
           let processName = isNode ? chalk.green.bold(displayName) : displayName;
           let memoryStr = p.memory !== undefined ? `${p.memory} MB` : 'Unknown';
