@@ -7,10 +7,16 @@ export function listCommand(program: Command) {
   program
     .command('list')
     .description('List all running localhost ports')
-    .action(async () => {
+    .option('--json', 'Output as JSON for scripting')
+    .action(async (options: { json?: boolean }) => {
       try {
         console.log(chalk.blue('Scanning for running ports...'));
         const ports = await getRunningPorts();
+
+        if (options.json) {
+          console.log(JSON.stringify(ports, null, 2));
+          return;
+        }
 
         if (ports.length === 0) {
           console.log(chalk.yellow('No listening ports found.'));

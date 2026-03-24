@@ -232,18 +232,17 @@ async function enrichWithCommandLines(processes: ProcessInfo[]) {
   let map = new Map<number, string>();
   if (process.platform === 'win32') {
     try {
-      const { stdout } = await execAsync(`wmic process get ProcessId,CommandLine /format:list`, { maxBuffer: 10 * 1024 * 1024 });
-      const lines = stdout.split(/\r?\n/);
-      let currentCmd = '';
-      for (const line of lines) {
-        if (line.startsWith('CommandLine=')) {
-          currentCmd = line.substring('CommandLine='.length).trim();
-        } else if (line.startsWith('ProcessId=')) {
-          const pid = parseInt(line.substring('ProcessId='.length), 10);
-          if (!isNaN(pid) && currentCmd) {
-            map.set(pid, currentCmd);
+      // PowerShell is reliable on modern Windows; wmic is deprecated
+      const psCmd = `powershell -NoProfile -Command "Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue | Select-Object Id,Path,CommandLine | ConvertTo-Json -Compress"`;
+      const { stdout } = await execAsync(psCmd, { maxBuffer: 10 * 1024 * 1024 });
+      const trimmed = stdout.trim();
+      if (trimmed) {
+        const parsed = JSON.parse(trimmed);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of items) {
+          if (item.Id && (item.CommandLine || item.Path)) {
+            map.set(item.Id, item.CommandLine || item.Path || '');
           }
-          currentCmd = '';
         }
       }
     } catch {}
@@ -295,3 +294,19 @@ function extractProjectName(cmdLine: string, fallbackName: string): string {
   return fallbackName;
 }
 
+const SYSTEM_PROCESSES = new Set([
+  'system', 'idle', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe',
+  'services.exe', 'lsass.exe', 'svchost.exe', 'winlogon.exe',
+  'launchd', 'init', 'systemd', 'kernel_task',
+]);
+
+export function isSystemProcess(p: ProcessInfo): boolean {
+  if (p.pid <= 4) return true;
+  return SYSTEM_PROCESSES.has(p.process.toLowerCase());
+}
+
+const SENSITIVE_PATTERNS = /(--(token|key|secret|password|api[_-]?key)=)\S+/gi;
+
+export function redactCmdLine(cmdLine: string): string {
+  return cmdLine.replace(SENSITIVE_PATTERNS, '$1[REDACTED]');
+}

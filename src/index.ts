@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { listCommand } from './commands/list';
 import { killCommand } from './commands/kill';
+import { openCommand } from './commands/open';
 import { tuiCommand, launchTUI } from './commands/tui';
 import chalk from 'chalk';
 
@@ -14,6 +15,7 @@ program
 // Register commands
 listCommand(program);
 killCommand(program);
+openCommand(program);
 tuiCommand(program);
 
 // Launch TUI by default if no command is passed, otherwise parse normally

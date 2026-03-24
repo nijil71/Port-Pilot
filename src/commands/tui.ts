@@ -1,9 +1,17 @@
 import { Command } from 'commander';
+import { exec } from 'child_process';
 import blessed from 'blessed';
-import { getRunningPorts, killProcess, ProcessInfo } from '../utils/ports';
+import { getRunningPorts, killProcess, isSystemProcess, redactCmdLine, ProcessInfo } from '../utils/ports';
 
-const FOOTER_TEXT = ' {cyan-fg}[k]{/cyan-fg} kill   {cyan-fg}[f]{/cyan-fg} force kill   {cyan-fg}[r]{/cyan-fg} refresh   {cyan-fg}[q]{/cyan-fg} quit';
 const AUTO_REFRESH_MS = 3000;
+
+type SortMode = 'port' | 'memory' | 'name';
+const SORT_LABELS: Record<SortMode, string> = {
+  port: 'port ↑',
+  memory: 'mem ↓',
+  name: 'name ↑',
+};
+const SORT_ORDER: SortMode[] = ['port', 'memory', 'name'];
 
 export async function launchTUI() {
   const screen = blessed.screen({
@@ -24,7 +32,7 @@ export async function launchTUI() {
     style: { fg: 'cyan', bg: 'black' },
   });
 
-  // ── Left panel: process list ──────────────────────────
+  // ── Left panel ────────────────────────────────────────
   const listPanel = blessed.box({
     parent: screen,
     top: 1,
@@ -34,11 +42,7 @@ export async function launchTUI() {
     border: { type: 'line' },
     label: ' {bold}Processes{/bold} ',
     tags: true,
-    style: {
-      border: { fg: '#444444' },
-      fg: 'white',
-      bg: 'black',
-    },
+    style: { border: { fg: '#444444' }, fg: 'white', bg: 'black' },
   });
 
   const listWidget = blessed.list({
@@ -52,10 +56,7 @@ export async function launchTUI() {
     mouse: true,
     scrollable: true,
     alwaysScroll: true,
-    scrollbar: {
-      ch: '▐',
-      style: { fg: '#333333' },
-    },
+    scrollbar: { ch: '▐', style: { fg: '#333333' } },
     style: {
       selected: { fg: 'black', bg: 'cyan', bold: true },
       item: { fg: 'white', bg: 'black' },
@@ -65,7 +66,7 @@ export async function launchTUI() {
     tags: true,
   });
 
-  // ── Right panel: detail view ──────────────────────────
+  // ── Right panel ───────────────────────────────────────
   const detailPanel = blessed.box({
     parent: screen,
     top: 1,
@@ -76,11 +77,20 @@ export async function launchTUI() {
     label: ' {bold}Details{/bold} ',
     tags: true,
     scrollable: true,
-    style: {
-      border: { fg: '#444444' },
-      fg: 'white',
-      bg: 'black',
-    },
+    style: { border: { fg: '#444444' }, fg: 'white', bg: 'black' },
+  });
+
+  // ── Search bar (hidden by default) ────────────────────
+  const searchBar = blessed.textbox({
+    parent: screen,
+    bottom: 2,
+    left: 0,
+    width: '100%',
+    height: 1,
+    hidden: true,
+    tags: false,
+    inputOnFocus: true,
+    style: { fg: 'white', bg: '#1a1a2e' },
   });
 
   // ── Status line ───────────────────────────────────────
@@ -96,13 +106,14 @@ export async function launchTUI() {
   });
 
   // ── Footer ────────────────────────────────────────────
+  const footerContent = ' {cyan-fg}[k]{/cyan-fg} kill  {cyan-fg}[f]{/cyan-fg} force  {cyan-fg}[o]{/cyan-fg} open  {cyan-fg}[/]{/cyan-fg} search  {cyan-fg}[s]{/cyan-fg} sort  {cyan-fg}[r]{/cyan-fg} refresh  {cyan-fg}[q]{/cyan-fg} quit';
   blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    content: FOOTER_TEXT,
+    content: footerContent,
     tags: true,
     style: { fg: 'white', bg: '#1a1a1a' },
   });
@@ -118,28 +129,27 @@ export async function launchTUI() {
     label: ' {bold}Confirm{/bold} ',
     tags: true,
     hidden: true,
-    style: {
-      fg: 'white',
-      bg: 'black',
-      border: { fg: 'yellow' },
-    },
+    style: { fg: 'white', bg: 'black', border: { fg: 'yellow' } },
   });
 
   screen.render();
 
   // ── State ─────────────────────────────────────────────
-  let ports: ProcessInfo[] = [];
+  let allPorts: ProcessInfo[] = [];
+  let filteredPorts: ProcessInfo[] = [];
   let pendingKill: { entry: ProcessInfo; force: boolean } | null = null;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let isRefreshing = false;
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastSelectedPort: number | null = null; // track by port number
+  let lastSelectedPort: number | null = null;
+  let sortMode: SortMode = 'port';
+  let searchQuery = '';
+  let isSearching = false;
+  let selectedPorts = new Set<number>(); // multi-select
 
   // ── Helpers ───────────────────────────────────────────
   function getDisplayName(p: ProcessInfo): string {
-    if (p.project && p.project !== p.process) {
-      return p.project;
-    }
+    if (p.project && p.project !== p.process) return p.project;
     return p.process.replace(/\.exe$/i, '');
   }
 
@@ -149,100 +159,124 @@ export async function launchTUI() {
     return right ? str + gap : gap + str;
   }
 
-  function buildLine(p: ProcessInfo): string {
-    const name = pad(getDisplayName(p), 28);
-    const port = pad(`:${p.port}`, 8);
-    const mem = p.memory !== undefined ? `${p.memory} MB` : '';
-    const base = `${name} ${port} ${pad(mem, 8, false)}`;
-
-    const isHighMem = p.memory !== undefined && p.memory >= 500;
-    const isNode = p.process.toLowerCase().includes('node');
-
-    if (isHighMem) return `{red-fg}${base}{/red-fg}`;
-    if (isNode) return `{green-fg}${base}{/green-fg}`;
-    return `{white-fg}${base}{/white-fg}`;
+  function sortPorts(list: ProcessInfo[]): ProcessInfo[] {
+    const sorted = [...list];
+    switch (sortMode) {
+      case 'port':
+        sorted.sort((a, b) => a.port - b.port);
+        break;
+      case 'memory':
+        sorted.sort((a, b) => (b.memory || 0) - (a.memory || 0));
+        break;
+      case 'name':
+        sorted.sort((a, b) => getDisplayName(a).localeCompare(getDisplayName(b)));
+        break;
+    }
+    return sorted;
   }
 
-  // ── Diff-based render (no flicker) ────────────────────
+  function filterPorts(list: ProcessInfo[]): ProcessInfo[] {
+    if (!searchQuery) return list;
+    const q = searchQuery.toLowerCase();
+    return list.filter(p =>
+      p.port.toString().includes(q) ||
+      p.process.toLowerCase().includes(q) ||
+      (p.project || '').toLowerCase().includes(q)
+    );
+  }
+
+  function applyFilters() {
+    filteredPorts = sortPorts(filterPorts(allPorts));
+  }
+
+  function updatePanelLabel() {
+    const sortLabel = SORT_LABELS[sortMode];
+    const searchLabel = searchQuery ? ` filter:"${searchQuery}"` : '';
+    listPanel.setLabel(` {bold}Processes{/bold} {gray-fg}(${sortLabel}${searchLabel}){/gray-fg} `);
+  }
+
+  // ── Render ────────────────────────────────────────────
   function renderList(preserveSelection = true) {
-    // Save current selection by port number
     const currentIdx = (listWidget as any).selected as number;
-    if (preserveSelection && ports.length > 0 && currentIdx >= 0 && currentIdx < ports.length) {
-      lastSelectedPort = ports[currentIdx]?.port ?? null;
+    if (preserveSelection && filteredPorts.length > 0 && currentIdx >= 0 && currentIdx < filteredPorts.length) {
+      lastSelectedPort = filteredPorts[currentIdx]?.port ?? null;
     }
 
-    // Build new items
     const newItems: string[] = [];
-    if (ports.length === 0) {
-      newItems.push('{gray-fg}  No listening ports found.{/gray-fg}');
+    if (filteredPorts.length === 0) {
+      newItems.push('{gray-fg}  No ports match.{/gray-fg}');
     } else {
-      for (const p of ports) {
-        newItems.push(buildLine(p));
+      for (const p of filteredPorts) {
+        const isSelected = selectedPorts.has(p.port);
+        const marker = isSelected ? '{yellow-fg}✓{/yellow-fg} ' : '  ';
+        const name = pad(getDisplayName(p), 26);
+        const port = pad(`:${p.port}`, 8);
+        const mem = p.memory !== undefined ? `${p.memory} MB` : '';
+        const base = `${marker}${name}${port}${pad(mem, 8, false)}`;
+
+        const isSys = isSystemProcess(p);
+        const isHighMem = p.memory !== undefined && p.memory >= 500;
+        const isNode = p.process.toLowerCase().includes('node');
+
+        if (isSys) {
+          newItems.push(`{gray-fg}${base}{/gray-fg}`);
+        } else if (isHighMem) {
+          newItems.push(`{red-fg}${base}{/red-fg}`);
+        } else if (isNode) {
+          newItems.push(`{green-fg}${base}{/green-fg}`);
+        } else {
+          newItems.push(`{white-fg}${base}{/white-fg}`);
+        }
       }
     }
 
-    // Only update items that changed to prevent flicker
-    const existingCount = (listWidget as any).items?.length ?? 0;
-    const needsFullRebuild =
-      existingCount !== newItems.length ||
-      newItems.some((item, i) => {
-        const existing = (listWidget as any).items?.[i];
-        if (!existing) return true;
-        const existingContent = (existing as any).content || '';
-        const stripped = item.replace(/\{[^}]+\}/g, '');
-        return existingContent !== stripped;
-      });
-
-    if (needsFullRebuild) {
-      listWidget.clearItems();
-      for (const item of newItems) {
-        listWidget.addItem(item);
-      }
+    listWidget.clearItems();
+    for (const item of newItems) {
+      listWidget.addItem(item);
     }
 
     // Restore selection
-    if (preserveSelection && lastSelectedPort !== null && ports.length > 0) {
-      const newIdx = ports.findIndex(p => p.port === lastSelectedPort);
+    if (preserveSelection && lastSelectedPort !== null && filteredPorts.length > 0) {
+      const newIdx = filteredPorts.findIndex(p => p.port === lastSelectedPort);
       if (newIdx >= 0) {
         listWidget.select(newIdx);
       } else {
-        // Port disappeared — clamp to valid range
-        const clampedIdx = Math.min(currentIdx, ports.length - 1);
-        listWidget.select(Math.max(0, clampedIdx));
-        lastSelectedPort = ports[Math.max(0, clampedIdx)]?.port ?? null;
+        const clamped = Math.min(currentIdx, filteredPorts.length - 1);
+        listWidget.select(Math.max(0, clamped));
       }
-    } else if (ports.length > 0) {
+    } else if (filteredPorts.length > 0) {
       listWidget.select(0);
-      lastSelectedPort = ports[0]?.port ?? null;
     }
 
+    updatePanelLabel();
     updateDetail();
     screen.render();
   }
 
   function updateDetail() {
     const idx = (listWidget as any).selected;
-    if (idx < 0 || idx >= ports.length) {
+    if (idx < 0 || idx >= filteredPorts.length) {
       detailPanel.setContent('\n  {gray-fg}No process selected{/gray-fg}');
       return;
     }
 
-    const p = ports[idx];
+    const p = filteredPorts[idx];
     const displayName = getDisplayName(p);
     const isNode = p.process.toLowerCase().includes('node');
-    const nameColor = isNode ? 'green' : 'cyan';
+    const isSys = isSystemProcess(p);
+    const nameColor = isSys ? 'gray' : isNode ? 'green' : 'cyan';
     const memStr = p.memory !== undefined ? `${p.memory} MB` : 'Unknown';
     const memColor = (p.memory || 0) >= 500 ? 'red' : 'white';
 
-    let processPath = p.cmdLine || p.process;
-    if (processPath.length > 60) {
-      processPath = '...' + processPath.slice(-57);
-    }
+    let cmdDisplay = redactCmdLine(p.cmdLine || p.process);
+    if (cmdDisplay.length > 60) cmdDisplay = '...' + cmdDisplay.slice(-57);
+
+    const sysTag = isSys ? '  {yellow-fg}⚠ system process{/yellow-fg}\n' : '';
 
     detailPanel.setContent([
       '',
       `  {${nameColor}-fg}{bold}${displayName}{/bold}{/${nameColor}-fg}`,
-      '',
+      sysTag,
       `  {gray-fg}PORT{/gray-fg}      {bold}${p.port}{/bold}`,
       '',
       `  {gray-fg}PID{/gray-fg}       {bold}${p.pid}{/bold}`,
@@ -254,43 +288,43 @@ export async function launchTUI() {
       `  {gray-fg}STATUS{/gray-fg}    {green-fg}● listening{/green-fg}`,
       '',
       `  {gray-fg}CMD{/gray-fg}`,
-      `  {gray-fg}${processPath}{/gray-fg}`,
+      `  {gray-fg}${cmdDisplay}{/gray-fg}`,
     ].join('\n'));
   }
 
-  // Listen for selection changes
   listWidget.on('select item', () => {
-    if (!pendingKill) {
+    if (!pendingKill && !isSearching) {
       updateDetail();
       screen.render();
     }
   });
 
-  // ── Refresh logic ─────────────────────────────────────
+  // ── Refresh ───────────────────────────────────────────
   async function refresh(silent = false) {
-    if (isRefreshing) return; // debounce concurrent calls
+    if (isRefreshing) return;
     isRefreshing = true;
 
-    if (!silent) {
-      setStatus('Scanning ports...', 'yellow');
-    }
+    if (!silent) setStatus('Scanning ports...', 'yellow');
 
     try {
-      const newPorts = await getRunningPorts();
-      ports = newPorts;
+      allPorts = await getRunningPorts();
     } catch {
-      // Keep existing data on error during auto-refresh
-      if (!silent && ports.length === 0) {
-        ports = [];
-      }
+      if (!silent && allPorts.length === 0) allPorts = [];
     }
 
     isRefreshing = false;
-    setStatus(`${ports.length} port${ports.length !== 1 ? 's' : ''} found`, 'gray');
+    applyFilters();
+
+    // Clean up multi-select for disappeared ports
+    const activePorts = new Set(allPorts.map(p => p.port));
+    for (const sp of selectedPorts) {
+      if (!activePorts.has(sp)) selectedPorts.delete(sp);
+    }
+
+    setStatus(`${filteredPorts.length}/${allPorts.length} ports`, 'gray');
     renderList(true);
   }
 
-  // ── Status management ─────────────────────────────────
   function setStatus(msg: string, color: string) {
     statusLine.setContent(` {${color}-fg}${msg}{/${color}-fg}`);
     screen.render();
@@ -300,88 +334,142 @@ export async function launchTUI() {
     if (statusTimer) clearTimeout(statusTimer);
     setStatus(msg, color);
     statusTimer = setTimeout(() => {
-      setStatus(`${ports.length} port${ports.length !== 1 ? 's' : ''} found`, 'gray');
+      setStatus(`${filteredPorts.length}/${allPorts.length} ports`, 'gray');
       statusTimer = null;
     }, duration);
   }
 
   function getSelectedPort(): ProcessInfo | null {
     const idx = (listWidget as any).selected;
-    if (idx >= 0 && idx < ports.length) {
-      return ports[idx];
-    }
+    if (idx >= 0 && idx < filteredPorts.length) return filteredPorts[idx];
     return null;
   }
 
-  // ── Auto-refresh timer ────────────────────────────────
+  // ── Auto-refresh ──────────────────────────────────────
   function startAutoRefresh() {
     stopAutoRefresh();
     refreshTimer = setInterval(() => {
-      // Skip auto-refresh if confirm dialog is open or a kill is in progress
-      if (pendingKill || isRefreshing) return;
+      if (pendingKill || isRefreshing || isSearching) return;
       refresh(true);
     }, AUTO_REFRESH_MS);
   }
 
   function stopAutoRefresh() {
-    if (refreshTimer) {
-      clearInterval(refreshTimer);
-      refreshTimer = null;
-    }
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
   }
 
-  // ── Confirmation flow ─────────────────────────────────
-  function showConfirm(selected: ProcessInfo, force: boolean) {
-    stopAutoRefresh(); // pause while dialog is open
-    pendingKill = { entry: selected, force };
+  // ── Open in browser ───────────────────────────────────
+  function openInBrowser(port: number) {
+    const url = `http://localhost:${port}`;
+    const cmd = process.platform === 'win32' ? `start ${url}`
+      : process.platform === 'darwin' ? `open ${url}`
+      : `xdg-open ${url}`;
+    exec(cmd, () => {});
+    flashStatus(`Opened localhost:${port}`, 'cyan', 1200);
+  }
 
-    const action = force
-      ? '{red-fg}{bold}FORCE KILL{/bold}{/red-fg}'
-      : '{yellow-fg}{bold}KILL{/bold}{/yellow-fg}';
+  // ── Confirmation ──────────────────────────────────────
+  function showConfirm(targets: ProcessInfo[], force: boolean) {
+    stopAutoRefresh();
+
+    // Block system process kills
+    const sysTargets = targets.filter(t => isSystemProcess(t));
+    if (sysTargets.length > 0) {
+      flashStatus(`⚠ Cannot kill system process${sysTargets.length > 1 ? 'es' : ''}`, 'yellow', 2000);
+      return;
+    }
+
+    pendingKill = { entry: targets[0], force };
+    const action = force ? '{red-fg}{bold}FORCE KILL{/bold}{/red-fg}' : '{yellow-fg}{bold}KILL{/bold}{/yellow-fg}';
+
+    let body: string;
+    if (targets.length === 1) {
+      const t = targets[0];
+      body = `   ${getDisplayName(t)} {gray-fg}on port{/gray-fg} {bold}${t.port}{/bold}\n   {gray-fg}PID ${t.pid}{/gray-fg}`;
+    } else {
+      body = `   {bold}${targets.length} processes{/bold} selected`;
+      // store all targets in pendingKill via closure
+      pendingKill = { entry: targets[0], force }; // we'll use batchTargets below
+    }
 
     confirmBox.setContent(
-      `\n` +
-      `   ${action} process?\n\n` +
-      `   ${getDisplayName(selected)} {gray-fg}on port{/gray-fg} {bold}${selected.port}{/bold}\n` +
-      `   {gray-fg}PID ${selected.pid}{/gray-fg}\n\n` +
-      `   {green-fg}[y]{/green-fg} confirm    {red-fg}[n]{/red-fg} cancel`
+      `\n   ${action} process${targets.length > 1 ? 'es' : ''}?\n\n${body}\n\n   {green-fg}[y]{/green-fg} confirm    {red-fg}[n]{/red-fg} cancel`
     );
     confirmBox.show();
     confirmBox.setFront();
+
+    // Store batch targets in a closure-accessible variable
+    (confirmBox as any)._batchTargets = targets;
     screen.render();
   }
 
   function hideConfirm() {
     pendingKill = null;
+    (confirmBox as any)._batchTargets = null;
     confirmBox.hide();
     listWidget.focus();
-    startAutoRefresh(); // resume
+    startAutoRefresh();
     screen.render();
   }
 
-  async function executeKill(selected: ProcessInfo, force: boolean) {
+  async function executeKill(targets: ProcessInfo[], force: boolean) {
     hideConfirm();
-
     const label = force ? 'Force killing' : 'Killing';
-    setStatus(`${label} port ${selected.port}...`, 'yellow');
+    setStatus(`${label} ${targets.length} process${targets.length > 1 ? 'es' : ''}...`, 'yellow');
 
-    try {
-      await killProcess(selected.pid, force);
-      flashStatus(`✓ Killed port ${selected.port}`, 'green', 1200);
-      // Immediate refresh after kill so list updates fast
-      setTimeout(() => refresh(false), 600);
-    } catch (err: any) {
-      const msg = err.message || 'Unknown error';
-      if (msg.includes('EPERM') || msg.includes('Access')) {
-        flashStatus(`✗ Permission denied — try running as admin`, 'red', 3000);
-      } else if (msg.includes('ESRCH') || msg.includes('not found')) {
-        flashStatus(`✗ Process already terminated`, 'yellow', 1500);
-        setTimeout(() => refresh(false), 500);
-      } else {
-        flashStatus(`✗ ${msg}`, 'red', 2500);
+    let killed = 0;
+    let failed = 0;
+    for (const t of targets) {
+      try {
+        await killProcess(t.pid, force);
+        killed++;
+        selectedPorts.delete(t.port);
+      } catch {
+        failed++;
       }
     }
+
+    if (failed > 0) {
+      flashStatus(`✓ ${killed} killed, ✗ ${failed} failed`, killed > 0 ? 'yellow' : 'red', 2000);
+    } else {
+      flashStatus(`✓ Killed ${killed} process${killed > 1 ? 'es' : ''}`, 'green', 1200);
+    }
+    setTimeout(() => refresh(false), 600);
   }
+
+  // ── Search ────────────────────────────────────────────
+  function enterSearch() {
+    isSearching = true;
+    stopAutoRefresh();
+    searchBar.show();
+    searchBar.setValue(searchQuery);
+    searchBar.focus();
+    screen.render();
+  }
+
+  function exitSearch() {
+    isSearching = false;
+    searchBar.hide();
+    listWidget.focus();
+    startAutoRefresh();
+    applyFilters();
+    renderList(false);
+  }
+
+  searchBar.on('submit', () => {
+    searchQuery = searchBar.getValue().trim();
+    exitSearch();
+  });
+
+  searchBar.on('cancel', () => {
+    searchQuery = '';
+    exitSearch();
+  });
+
+  searchBar.key(['escape'], () => {
+    searchQuery = '';
+    exitSearch();
+  });
 
   // ── Key bindings ──────────────────────────────────────
   screen.key(['q', 'C-c'], () => {
@@ -391,28 +479,71 @@ export async function launchTUI() {
   });
 
   screen.key(['r'], async () => {
-    if (pendingKill) return;
+    if (pendingKill || isSearching) return;
     await refresh(false);
   });
 
-  screen.key(['k'], () => {
-    if (pendingKill) return;
+  screen.key(['/'], () => {
+    if (pendingKill || isSearching) return;
+    enterSearch();
+  });
+
+  screen.key(['s'], () => {
+    if (pendingKill || isSearching) return;
+    const idx = SORT_ORDER.indexOf(sortMode);
+    sortMode = SORT_ORDER[(idx + 1) % SORT_ORDER.length];
+    applyFilters();
+    renderList(true);
+    flashStatus(`Sort: ${SORT_LABELS[sortMode]}`, 'cyan', 800);
+  });
+
+  screen.key(['o'], () => {
+    if (pendingKill || isSearching) return;
     const s = getSelectedPort();
-    if (s) showConfirm(s, false);
+    if (s) openInBrowser(s.port);
+  });
+
+  screen.key(['space'], () => {
+    if (pendingKill || isSearching) return;
+    const s = getSelectedPort();
+    if (!s) return;
+
+    if (selectedPorts.has(s.port)) {
+      selectedPorts.delete(s.port);
+    } else {
+      selectedPorts.add(s.port);
+    }
+    renderList(true);
+  });
+
+  screen.key(['k'], () => {
+    if (pendingKill || isSearching) return;
+    const targets = getKillTargets();
+    if (targets.length > 0) showConfirm(targets, false);
   });
 
   screen.key(['f'], () => {
-    if (pendingKill) return;
-    const s = getSelectedPort();
-    if (s) showConfirm(s, true);
+    if (pendingKill || isSearching) return;
+    const targets = getKillTargets();
+    if (targets.length > 0) showConfirm(targets, true);
   });
+
+  function getKillTargets(): ProcessInfo[] {
+    if (selectedPorts.size > 0) {
+      return filteredPorts.filter(p => selectedPorts.has(p.port));
+    }
+    const s = getSelectedPort();
+    return s ? [s] : [];
+  }
 
   screen.key(['y'], async () => {
     if (!pendingKill) return;
-    await executeKill(pendingKill.entry, pendingKill.force);
+    const targets = (confirmBox as any)._batchTargets as ProcessInfo[] || [pendingKill.entry];
+    await executeKill(targets, pendingKill.force);
   });
 
   screen.key(['n', 'escape'], () => {
+    if (isSearching) return; // handled by searchBar
     if (!pendingKill) return;
     hideConfirm();
     flashStatus('Cancelled', 'gray', 800);
@@ -428,7 +559,5 @@ export function tuiCommand(program: Command) {
   program
     .command('ui')
     .description('Interactive TUI for managing ports')
-    .action(async () => {
-      await launchTUI();
-    });
+    .action(async () => { await launchTUI(); });
 }
