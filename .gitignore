@@ -1,6 +1,5 @@
 node_modules/
 dist/
-bin/
 out.txt
-
 GEMINI.md
+test-server.js

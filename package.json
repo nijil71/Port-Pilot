@@ -12,9 +12,10 @@
   "bin": {
     "port-pilot": "./bin/port-pilot.js"
   },
-  "files": ["dist", "bin"],
+  "files": ["dist", "bin", "README.md"],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node bin/port-pilot.js"
   },
   "dependencies": {
