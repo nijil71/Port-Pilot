@@ -3,6 +3,7 @@ import blessed from 'blessed';
 import { getRunningPorts, killProcess, ProcessInfo } from '../utils/ports';
 
 const FOOTER_TEXT = ' {cyan-fg}[k]{/cyan-fg} kill   {cyan-fg}[f]{/cyan-fg} force kill   {cyan-fg}[r]{/cyan-fg} refresh   {cyan-fg}[q]{/cyan-fg} quit';
+const AUTO_REFRESH_MS = 3000;
 
 export async function launchTUI() {
   const screen = blessed.screen({
@@ -82,7 +83,7 @@ export async function launchTUI() {
     },
   });
 
-  // ── Status line (above footer) ────────────────────────
+  // ── Status line ───────────────────────────────────────
   const statusLine = blessed.box({
     parent: screen,
     bottom: 1,
@@ -95,7 +96,7 @@ export async function launchTUI() {
   });
 
   // ── Footer ────────────────────────────────────────────
-  const footer = blessed.box({
+  blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
@@ -129,10 +130,15 @@ export async function launchTUI() {
   // ── State ─────────────────────────────────────────────
   let ports: ProcessInfo[] = [];
   let pendingKill: { entry: ProcessInfo; force: boolean } | null = null;
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let isRefreshing = false;
+  let statusTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastSelectedPort: number | null = null; // track by port number
 
+  // ── Helpers ───────────────────────────────────────────
   function getDisplayName(p: ProcessInfo): string {
     if (p.project && p.project !== p.process) {
-      return `${p.project}`;
+      return p.project;
     }
     return p.process.replace(/\.exe$/i, '');
   }
@@ -143,38 +149,73 @@ export async function launchTUI() {
     return right ? str + gap : gap + str;
   }
 
-  function renderList() {
-    listWidget.clearItems();
+  function buildLine(p: ProcessInfo): string {
+    const name = pad(getDisplayName(p), 28);
+    const port = pad(`:${p.port}`, 8);
+    const mem = p.memory !== undefined ? `${p.memory} MB` : '';
+    const base = `${name} ${port} ${pad(mem, 8, false)}`;
 
+    const isHighMem = p.memory !== undefined && p.memory >= 500;
+    const isNode = p.process.toLowerCase().includes('node');
+
+    if (isHighMem) return `{red-fg}${base}{/red-fg}`;
+    if (isNode) return `{green-fg}${base}{/green-fg}`;
+    return `{white-fg}${base}{/white-fg}`;
+  }
+
+  // ── Diff-based render (no flicker) ────────────────────
+  function renderList(preserveSelection = true) {
+    // Save current selection by port number
+    const currentIdx = (listWidget as any).selected as number;
+    if (preserveSelection && ports.length > 0 && currentIdx >= 0 && currentIdx < ports.length) {
+      lastSelectedPort = ports[currentIdx]?.port ?? null;
+    }
+
+    // Build new items
+    const newItems: string[] = [];
     if (ports.length === 0) {
-      listWidget.addItem('{gray-fg}  No listening ports found.{/gray-fg}');
-      listWidget.select(0);
-      screen.render();
-      return;
-    }
-
-    for (const p of ports) {
-      const name = pad(getDisplayName(p), 28);
-      const port = pad(`:${p.port}`, 8);
-      const mem = p.memory !== undefined ? `${p.memory} MB` : '';
-
-      const isNode = p.process.toLowerCase().includes('node');
-      const isHighMem = p.memory !== undefined && p.memory >= 500;
-
-      let line = `${name} ${port} ${pad(mem, 8, false)}`;
-
-      if (isHighMem) {
-        line = `{red-fg}${line}{/red-fg}`;
-      } else if (isNode) {
-        line = `{green-fg}${line}{/green-fg}`;
-      } else {
-        line = `{white-fg}${line}{/white-fg}`;
+      newItems.push('{gray-fg}  No listening ports found.{/gray-fg}');
+    } else {
+      for (const p of ports) {
+        newItems.push(buildLine(p));
       }
-
-      listWidget.addItem(line);
     }
 
-    listWidget.select(0);
+    // Only update items that changed to prevent flicker
+    const existingCount = (listWidget as any).items?.length ?? 0;
+    const needsFullRebuild =
+      existingCount !== newItems.length ||
+      newItems.some((item, i) => {
+        const existing = (listWidget as any).items?.[i];
+        if (!existing) return true;
+        const existingContent = (existing as any).content || '';
+        const stripped = item.replace(/\{[^}]+\}/g, '');
+        return existingContent !== stripped;
+      });
+
+    if (needsFullRebuild) {
+      listWidget.clearItems();
+      for (const item of newItems) {
+        listWidget.addItem(item);
+      }
+    }
+
+    // Restore selection
+    if (preserveSelection && lastSelectedPort !== null && ports.length > 0) {
+      const newIdx = ports.findIndex(p => p.port === lastSelectedPort);
+      if (newIdx >= 0) {
+        listWidget.select(newIdx);
+      } else {
+        // Port disappeared — clamp to valid range
+        const clampedIdx = Math.min(currentIdx, ports.length - 1);
+        listWidget.select(Math.max(0, clampedIdx));
+        lastSelectedPort = ports[Math.max(0, clampedIdx)]?.port ?? null;
+      }
+    } else if (ports.length > 0) {
+      listWidget.select(0);
+      lastSelectedPort = ports[0]?.port ?? null;
+    }
+
     updateDetail();
     screen.render();
   }
@@ -183,26 +224,22 @@ export async function launchTUI() {
     const idx = (listWidget as any).selected;
     if (idx < 0 || idx >= ports.length) {
       detailPanel.setContent('\n  {gray-fg}No process selected{/gray-fg}');
-      screen.render();
       return;
     }
 
     const p = ports[idx];
     const displayName = getDisplayName(p);
     const isNode = p.process.toLowerCase().includes('node');
-
     const nameColor = isNode ? 'green' : 'cyan';
     const memStr = p.memory !== undefined ? `${p.memory} MB` : 'Unknown';
     const memColor = (p.memory || 0) >= 500 ? 'red' : 'white';
 
-    // Extract working directory from cmdLine
     let processPath = p.cmdLine || p.process;
-    // Truncate for display if very long
     if (processPath.length > 60) {
       processPath = '...' + processPath.slice(-57);
     }
 
-    const lines = [
+    detailPanel.setContent([
       '',
       `  {${nameColor}-fg}{bold}${displayName}{/bold}{/${nameColor}-fg}`,
       '',
@@ -218,29 +255,54 @@ export async function launchTUI() {
       '',
       `  {gray-fg}CMD{/gray-fg}`,
       `  {gray-fg}${processPath}{/gray-fg}`,
-    ];
-
-    detailPanel.setContent(lines.join('\n'));
-    screen.render();
+    ].join('\n'));
   }
 
   // Listen for selection changes
   listWidget.on('select item', () => {
-    if (!pendingKill) updateDetail();
+    if (!pendingKill) {
+      updateDetail();
+      screen.render();
+    }
   });
 
-  async function refresh() {
-    statusLine.setContent(' {yellow-fg}Scanning ports...{/yellow-fg}');
-    screen.render();
+  // ── Refresh logic ─────────────────────────────────────
+  async function refresh(silent = false) {
+    if (isRefreshing) return; // debounce concurrent calls
+    isRefreshing = true;
 
-    try {
-      ports = await getRunningPorts();
-    } catch {
-      ports = [];
+    if (!silent) {
+      setStatus('Scanning ports...', 'yellow');
     }
 
-    statusLine.setContent(` {gray-fg}${ports.length} ports found{/gray-fg}`);
-    renderList();
+    try {
+      const newPorts = await getRunningPorts();
+      ports = newPorts;
+    } catch {
+      // Keep existing data on error during auto-refresh
+      if (!silent && ports.length === 0) {
+        ports = [];
+      }
+    }
+
+    isRefreshing = false;
+    setStatus(`${ports.length} port${ports.length !== 1 ? 's' : ''} found`, 'gray');
+    renderList(true);
+  }
+
+  // ── Status management ─────────────────────────────────
+  function setStatus(msg: string, color: string) {
+    statusLine.setContent(` {${color}-fg}${msg}{/${color}-fg}`);
+    screen.render();
+  }
+
+  function flashStatus(msg: string, color: string, duration = 1500) {
+    if (statusTimer) clearTimeout(statusTimer);
+    setStatus(msg, color);
+    statusTimer = setTimeout(() => {
+      setStatus(`${ports.length} port${ports.length !== 1 ? 's' : ''} found`, 'gray');
+      statusTimer = null;
+    }, duration);
   }
 
   function getSelectedPort(): ProcessInfo | null {
@@ -251,25 +313,36 @@ export async function launchTUI() {
     return null;
   }
 
-  function flashStatus(msg: string, color: string, duration = 1500) {
-    statusLine.setContent(` {${color}-fg}${msg}{/${color}-fg}`);
-    screen.render();
-    setTimeout(() => {
-      statusLine.setContent(` {gray-fg}${ports.length} ports found{/gray-fg}`);
-      screen.render();
-    }, duration);
+  // ── Auto-refresh timer ────────────────────────────────
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    refreshTimer = setInterval(() => {
+      // Skip auto-refresh if confirm dialog is open or a kill is in progress
+      if (pendingKill || isRefreshing) return;
+      refresh(true);
+    }, AUTO_REFRESH_MS);
+  }
+
+  function stopAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
   }
 
   // ── Confirmation flow ─────────────────────────────────
   function showConfirm(selected: ProcessInfo, force: boolean) {
+    stopAutoRefresh(); // pause while dialog is open
     pendingKill = { entry: selected, force };
-    const action = force ? '{red-fg}{bold}FORCE KILL{/bold}{/red-fg}' : '{yellow-fg}{bold}KILL{/bold}{/yellow-fg}';
-    const displayName = getDisplayName(selected);
+
+    const action = force
+      ? '{red-fg}{bold}FORCE KILL{/bold}{/red-fg}'
+      : '{yellow-fg}{bold}KILL{/bold}{/yellow-fg}';
 
     confirmBox.setContent(
       `\n` +
       `   ${action} process?\n\n` +
-      `   ${displayName} {gray-fg}on port{/gray-fg} {bold}${selected.port}{/bold}\n` +
+      `   ${getDisplayName(selected)} {gray-fg}on port{/gray-fg} {bold}${selected.port}{/bold}\n` +
       `   {gray-fg}PID ${selected.pid}{/gray-fg}\n\n` +
       `   {green-fg}[y]{/green-fg} confirm    {red-fg}[n]{/red-fg} cancel`
     );
@@ -282,6 +355,7 @@ export async function launchTUI() {
     pendingKill = null;
     confirmBox.hide();
     listWidget.focus();
+    startAutoRefresh(); // resume
     screen.render();
   }
 
@@ -289,27 +363,36 @@ export async function launchTUI() {
     hideConfirm();
 
     const label = force ? 'Force killing' : 'Killing';
-    statusLine.setContent(` {yellow-fg}${label} port ${selected.port}...{/yellow-fg}`);
-    screen.render();
+    setStatus(`${label} port ${selected.port}...`, 'yellow');
 
     try {
       await killProcess(selected.pid, force);
       flashStatus(`✓ Killed port ${selected.port}`, 'green', 1200);
-      setTimeout(() => refresh(), 1200);
+      // Immediate refresh after kill so list updates fast
+      setTimeout(() => refresh(false), 600);
     } catch (err: any) {
-      flashStatus(`✗ ${err.message}`, 'red', 2500);
+      const msg = err.message || 'Unknown error';
+      if (msg.includes('EPERM') || msg.includes('Access')) {
+        flashStatus(`✗ Permission denied — try running as admin`, 'red', 3000);
+      } else if (msg.includes('ESRCH') || msg.includes('not found')) {
+        flashStatus(`✗ Process already terminated`, 'yellow', 1500);
+        setTimeout(() => refresh(false), 500);
+      } else {
+        flashStatus(`✗ ${msg}`, 'red', 2500);
+      }
     }
   }
 
   // ── Key bindings ──────────────────────────────────────
   screen.key(['q', 'C-c'], () => {
+    stopAutoRefresh();
     screen.destroy();
     process.exit(0);
   });
 
   screen.key(['r'], async () => {
     if (pendingKill) return;
-    await refresh();
+    await refresh(false);
   });
 
   screen.key(['k'], () => {
@@ -335,8 +418,10 @@ export async function launchTUI() {
     flashStatus('Cancelled', 'gray', 800);
   });
 
+  // ── Boot ──────────────────────────────────────────────
   listWidget.focus();
-  await refresh();
+  await refresh(false);
+  startAutoRefresh();
 }
 
 export function tuiCommand(program: Command) {
