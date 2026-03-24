@@ -4,8 +4,8 @@
 
 **The smart, lightning-fast CLI & TUI for discovering and managing localhost ports.**
 
-[![npm version](https://img.shields.io/npm/v/port-pilot?style=flat-square)](https://www.npmjs.com/package/port-pilot)
-[![Node.js Version](https://img.shields.io/node/v/port-pilot?style=flat-square)](https://nodejs.org)
+[![npm version](https://img.shields.io/npm/v/@nijil71/port-pilot?style=flat-square)](https://www.npmjs.com/package/@nijil71/port-pilot)
+[![Node.js Version](https://img.shields.io/node/v/@nijil71/port-pilot?style=flat-square)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 
@@ -13,7 +13,7 @@
 
 ---
 
-## 🚀 About Port Pilot
+## About Port Pilot
 
 **Port Pilot** is a modern, developer-friendly developer tool that detects running processes on your localhost ports and lets you manage or terminate them effortlessly. It features an incredibly fast machine-readable CLI list output, and a stunning, terminal user interface (TUI) inspired by modern AI coding assistants.
 
@@ -38,7 +38,7 @@ Let Port Pilot do the heavy lifting in style. It securely maps open network port
 Install globally via `npm` (requires Node.js `>= 18`):
 
 ```bash
-npm install -g port-pilot
+npm install -g @nijil71/port-pilot
 ```
 
 ## 🛠️ Usage
